@@ -1,8 +1,27 @@
 #!/usr/bin/env sh
 set -eu
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_PATH="$0"
+if command -v readlink >/dev/null 2>&1; then
+  SCRIPT_PATH=$(readlink -f "$0" 2>/dev/null || echo "$0")
+elif command -v realpath >/dev/null 2>&1; then
+  SCRIPT_PATH=$(realpath "$0" 2>/dev/null || echo "$0")
+fi
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
 cd "$SCRIPT_DIR"
+
+# 准备缓存目录
+mkdir -p /tmp/pansou_cache /tmp/root_cache
+
+# 如果存在 PanCheck 服务，自动后台启动
+PANCHECK_DIR="${PANCHECK_DIR:-/root/PanCheck}"
+if [ -d "$PANCHECK_DIR" ] && [ -f "$PANCHECK_DIR/pancheck" ]; then
+  if ! pgrep -f "$PANCHECK_DIR/pancheck" >/dev/null 2>&1 && ! pgrep -x "pancheck" >/dev/null 2>&1; then
+    chmod +x "$PANCHECK_DIR/pancheck" 2>/dev/null || true
+    echo "正在后台启动 PanCheck 网盘检测服务..."
+    (cd "$PANCHECK_DIR" && nohup ./pancheck >/dev/null 2>&1 &)
+  fi
+fi
 
 # 基础配置
 export PORT="${PORT:-8002}"
