@@ -190,6 +190,26 @@ if [ ! -x "$APP_BIN" ]; then
   exit 1
 fi
 
-echo "Starting PanSou on port $PORT"
-echo "Health check: http://localhost:$PORT/api/health"
-exec "$APP_BIN"
+# 检查并优雅停止已在运行的旧实例
+OLD_PID=$(pgrep -f "$APP_BIN" 2>/dev/null || pgrep -x "pansou" 2>/dev/null || true)
+if [ -n "$OLD_PID" ]; then
+  echo "[INFO] 发现正在运行的旧进程 (PID: $OLD_PID)，正在停止以重新加载..."
+  kill $OLD_PID 2>/dev/null || true
+  sleep 1
+fi
+
+# 后台启动并完全静默（无任何日志输出）
+echo "正在后台启动 PanSou (端口: $PORT)..."
+nohup "$APP_BIN" > /dev/null 2>&1 &
+APP_PID=$!
+
+sleep 1
+if kill -0 "$APP_PID" 2>/dev/null; then
+  echo "PanSou 已在后台成功启动！"
+  echo "进程 PID: $APP_PID"
+  echo "服务端口: $PORT"
+  echo "健康检查: http://localhost:$PORT/api/health"
+else
+  echo "[ERROR] 后台启动失败，请检查端口 $PORT 是否被占用或文件执行权限。" >&2
+  exit 1
+fi
