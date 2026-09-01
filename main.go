@@ -25,6 +25,7 @@ import (
 
 	// 以下是插件的空导入，用于触发各插件的init函数，实现自动注册
 	// 添加新插件时，只需在此处添加对应的导入语句即可
+	_ "pansou/plugin/djgou"
 	_ "pansou/plugin/duoduo"
 	_ "pansou/plugin/dy4k"
 	_ "pansou/plugin/dyyjpro"
@@ -32,6 +33,7 @@ import (
 	_ "pansou/plugin/gaoqing888"
 	_ "pansou/plugin/gying"
 	_ "pansou/plugin/haitunsou"
+	_ "pansou/plugin/hdmoli"
 	_ "pansou/plugin/hunhepan"
 	_ "pansou/plugin/ikantv"
 	_ "pansou/plugin/jutoushe"
@@ -61,6 +63,7 @@ import (
 	_ "pansou/plugin/xiaozhang"
 	_ "pansou/plugin/yingso"
 	_ "pansou/plugin/yunso"
+	_ "pansou/plugin/yunsou"
 	_ "pansou/plugin/zlxapp"
 	_ "pansou/plugin/zxzj"
 )

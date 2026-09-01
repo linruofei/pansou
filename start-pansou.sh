@@ -38,7 +38,7 @@ detect_repo() {
       fi
     fi
   fi
-  echo "fish2018/pansou"
+  echo "linruofei/pansou"
 }
 
 # 检测系统架构
