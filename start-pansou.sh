@@ -117,14 +117,19 @@ check_and_update() {
   TMP_TAR="$TMP_DIR/pansou.tar.gz"
 
   if ! download_file "$DOWNLOAD_URL" "$TMP_TAR"; then
-    echo "[WARN] 拉取最新版本失败（网络超时或未发布 Release）。"
-    rm -rf "$TMP_DIR"
-    if [ -x "$APP_BIN" ]; then
-      echo "[INFO] 本地已有可执行文件，继续使用当前版本启动。"
-      return 0
-    else
-      echo "[ERROR] 本地不存在可执行文件 $APP_BIN，启动失败。" >&2
-      exit 1
+    # 备用下载地址 (兼容直接使用 tag 名字路径)
+    FALLBACK_URL="${GH_PROXY}https://github.com/${REPO}/releases/download/latest/pansou-linux-${GOARCH}.tar.gz"
+    echo "[INFO] 尝试备用下载地址: $FALLBACK_URL ..."
+    if ! download_file "$FALLBACK_URL" "$TMP_TAR"; then
+      echo "[WARN] 拉取最新版本失败（网络超时或未发布 Release）。"
+      rm -rf "$TMP_DIR"
+      if [ -x "$APP_BIN" ]; then
+        echo "[INFO] 本地已有可执行文件，继续使用当前版本启动。"
+        return 0
+      else
+        echo "[ERROR] 本地不存在可执行文件 $APP_BIN，启动失败。" >&2
+        exit 1
+      fi
     fi
   fi
 
