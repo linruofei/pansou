@@ -1,0 +1,100 @@
+name: 构建 Linux 可执行程序
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: 构建 Linux (${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: 编译 Linux 二进制
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          TARGET_DIR="dist/pansou-linux-${{ matrix.goarch }}"
+          mkdir -p "$TARGET_DIR"
+          go build -trimpath -ldflags="-s -w -extldflags '-static'" -o "$TARGET_DIR/pansou" .
+
+      - name: 打包运行目录 (包含二进制、web前端及启动脚本)
+        run: |
+          TARGET_DIR="dist/pansou-linux-${{ matrix.goarch }}"
+
+          # 复制 web 静态资源目录（如果存在）
+          if [ -d "web" ]; then
+            cp -r web "$TARGET_DIR/web"
+          fi
+
+          # 复制启动脚本（如果存在）
+          if [ -f "start-pansou.sh" ]; then
+            cp start-pansou.sh "$TARGET_DIR/start-pansou.sh"
+            chmod +x "$TARGET_DIR/start-pansou.sh"
+          fi
+
+          # 赋予主程序执行权限
+          chmod +x "$TARGET_DIR/pansou"
+
+          # 打包为 tar.gz
+          cd dist
+          tar -czvf "pansou-linux-${{ matrix.goarch }}.tar.gz" "pansou-linux-${{ matrix.goarch }}"
+
+      - name: 上传构建产物 (可在 Actions 运行页面下载)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pansou-linux-${{ matrix.goarch }}
+          path: dist/pansou-linux-${{ matrix.goarch }}.tar.gz
+          retention-days: 30
+
+  release:
+    name: 发布到 GitHub Releases
+    needs: build-linux
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载所有构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets/
+          merge-multiple: true
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Latest Release' }}
+          files: release-assets/*.tar.gz
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          generate_release_notes: true
