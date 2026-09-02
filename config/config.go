@@ -309,11 +309,11 @@ func getOptimizeMemory() bool {
 func getPluginTimeout() int {
 	timeoutEnv := os.Getenv("PLUGIN_TIMEOUT")
 	if timeoutEnv == "" {
-		return 30 // 默认30秒
+		return 60 // 默认60秒
 	}
 	timeout, err := strconv.Atoi(timeoutEnv)
 	if err != nil || timeout <= 0 {
-		return 30
+		return 60
 	}
 	return timeout
 }
@@ -436,8 +436,8 @@ func getHTTPReadTimeout() time.Duration {
 		}
 	}
 	
-	// 自动计算：默认30秒，异步模式下根据异步响应超时调整
-	timeout := 30 * time.Second
+	// 自动计算：默认60秒，异步模式下根据异步响应超时调整
+	timeout := 60 * time.Second
 	
 	// 如果启用了异步插件，确保读取超时足够长
 	if getAsyncPluginEnabled() {
