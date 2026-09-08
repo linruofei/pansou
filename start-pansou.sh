@@ -38,6 +38,10 @@ export CHANNELS="${CHANNELS:-tgsearchers7,Aliyun_4K_Movies,bdbdndn11,yunpanx,bsb
 # 插件配置
 export ENABLED_PLUGINS="${ENABLED_PLUGINS:-dyyjpro,duoduo,djgou,feikuai,gaoqing888,gying,hdmoli,haitunsou,hunhepan,ikantv,jutoushe,kkv,dy4k,libvio,lingjisp,lou1,melost,miosou,nyaa,ouge,panlian,qqpd,quark4k,quarksoo,quarktv,qupanshe,sousou,thepiratebay,ting77,wanou,weibo,xb6v,xiaokupan,xiaozhang,xiaoyu,yingso,yunso,yunsou,zlxapp,zlxapp,zxzj}"
 
+# 异步搜索与超时设置
+export ASYNC_RESPONSE_TIMEOUT="${ASYNC_RESPONSE_TIMEOUT:-10}"
+export ASYNC_LOG_ENABLED="${ASYNC_LOG_ENABLED:-false}"
+
 APP_BIN="${APP_BIN:-$SCRIPT_DIR/pansou}"
 VERSION_FILE="$SCRIPT_DIR/.version"
 
@@ -137,7 +141,7 @@ check_and_update() {
 
   if ! download_file "$DOWNLOAD_URL" "$TMP_TAR"; then
     # 备用下载地址 (兼容直接使用 tag 名字路径)
-    FALLBACK_URL="${GH_PROXY}https://github.com/${REPO}/releases/download/latest/pansou-linux-${GOARCH}.tar.gz"
+    FALLBACK_URL="${GH_PROXY}https://github.com/${REPO}/releases/download/${REMOTE_TAG:-latest}/pansou-linux-${GOARCH}.tar.gz"
     echo "[INFO] 尝试备用下载地址: $FALLBACK_URL ..."
     if ! download_file "$FALLBACK_URL" "$TMP_TAR"; then
       echo "[WARN] 拉取最新版本失败（网络超时或未发布 Release）。"
