@@ -2,6 +2,7 @@ package util
 
 import (
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -201,8 +202,13 @@ func ParseSearchResults(html string, channel string) ([]model.SearchResult, stri
 		// 1. 从文本内容中提取所有网盘链接和密码
 		extractedLinks := ExtractNetDiskLinks(messageText)
 
-		// 2. 从a标签中提取链接
-		messageTextElem.Find("a").Each(func(i int, a *goquery.Selection) {
+		// 2. 从消息正文和行内键盘按钮中提取链接
+		//
+		// Telegram 网页版会把 inline keyboard 渲染在
+		// .tgme_widget_message_inline_keyboard 中，它与
+		// .tgme_widget_message_text 是同级节点。因此不能只遍历正文中的
+		// <a>，否则按钮里的网盘链接会被完全忽略。
+		s.Find(".tgme_widget_message_text a, .tgme_widget_message_inline_keyboard a[href]").Each(func(i int, a *goquery.Selection) {
 			href, exists := a.Attr("href")
 			if !exists {
 				return
@@ -211,7 +217,13 @@ func ParseSearchResults(html string, channel string) ([]model.SearchResult, stri
 			// 使用更精确的方式匹配网盘链接
 			if isSupportedLink(href) {
 				linkType := GetLinkType(href)
-				password := ExtractPassword(messageText, href)
+				// 某些频道会把提取码写在按钮文字中，因此同时使用正文和
+				// 按钮标签作为密码提取上下文。
+				passwordContext := messageText
+				if buttonText := strings.TrimSpace(a.Text()); buttonText != "" {
+					passwordContext += "\n" + buttonText
+				}
+				password := ExtractPassword(passwordContext, href)
 
 				// 如果是百度网盘链接，记录链接和密码的对应关系
 				if linkType == "baidu" {
@@ -224,6 +236,9 @@ func ParseSearchResults(html string, channel string) ([]model.SearchResult, stri
 					// 记录密码
 					if password != "" {
 						baiduLinkPasswords[baseURL] = password
+					} else if _, exists := baiduLinkPasswords[baseURL]; !exists {
+						// 即使没有密码，也保留无密码的百度分享链接。
+						baiduLinkPasswords[baseURL] = ""
 					}
 				} else if linkType == "tianyi" {
 					// 如果是天翼云盘链接，记录链接和密码的对应关系
@@ -322,6 +337,9 @@ func ParseSearchResults(html string, channel string) ([]model.SearchResult, stri
 				// 记录密码
 				if password != "" {
 					baiduLinkPasswords[baseURL] = password
+				} else if _, exists := baiduLinkPasswords[baseURL]; !exists {
+					// 即使没有密码，也保留无密码的百度分享链接。
+					baiduLinkPasswords[baseURL] = ""
 				}
 			} else if linkType == "tianyi" {
 				// 如果是天翼云盘链接，记录链接和密码的对应关系
@@ -616,27 +634,25 @@ func extractImageURLFromStyle(style string) string {
 
 // extractTitle 从消息HTML和文本内容中提取标题
 func extractTitle(htmlContent string, textContent string) string {
-	// 从HTML内容中提取标题
-	if brIndex := strings.Index(htmlContent, "<br"); brIndex > 0 {
-		// 提取<br>前的HTML内容
-		firstLineHTML := htmlContent[:brIndex]
-
-		// 创建一个文档来解析这个HTML片段
-		doc, err := goquery.NewDocumentFromReader(strings.NewReader("<div>" + firstLineHTML + "</div>"))
+	// 按 <br> 分行解析 HTML。部分频道第一行是“📅 9月9日”之类的
+	// 日期头，真正的作品名在下一行；如果把日期当标题，服务层的
+	// 关键词过滤会把已经提取到的按钮链接全部过滤掉。
+	if htmlContent != "" {
+		htmlWithNewlines := brTagPattern.ReplaceAllString(htmlContent, "\n")
+		doc, err := goquery.NewDocumentFromReader(strings.NewReader("<div>" + htmlWithNewlines + "</div>"))
 		if err == nil {
-			// 获取解析后的文本
-			firstLine := strings.TrimSpace(doc.Text())
-
-			// 如果第一行以"名称："开头，则提取冒号后面的内容作为标题
-			if strings.HasPrefix(firstLine, "名称：") {
-				return strings.TrimSpace(firstLine[len("名称："):])
-			}
-
-			// 如果第一行只是标签(以#开头)，尝试从第二行提取
-			if strings.HasPrefix(firstLine, "#") && !strings.Contains(firstLine, "名称") {
-				// 继续从文本内容提取
-			} else {
-				return firstLine
+			for _, line := range strings.Split(doc.Text(), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || isTelegramDateHeader(line) || isTitleMetadataLine(line) {
+					continue
+				}
+				if strings.HasPrefix(line, "名称：") {
+					return strings.TrimSpace(line[len("名称："):])
+				}
+				if strings.HasPrefix(line, "#") && !strings.Contains(line, "名称") {
+					continue
+				}
+				return CutTitleByKeywords(line, []string{"简介", "描述"})
 			}
 		}
 	}
@@ -685,6 +701,23 @@ func extractTitle(htmlContent string, textContent string) string {
 	// 统一裁剪：遇到简介/描述等关键字时，只保留前半部分
 	result = CutTitleByKeywords(result, []string{"简介", "描述"})
 	return result
+}
+
+var brTagPattern = regexp.MustCompile(`(?i)<br\s*/?>`)
+var telegramDateHeaderPattern = regexp.MustCompile(`^📅?\s*\d{1,4}(?:年\d{1,2}月\d{1,2}日|[-/.]\d{1,2}[-/.]\d{1,2})$|^📅?\s*\d{1,2}月\d{1,2}日$`)
+
+func isTelegramDateHeader(line string) bool {
+	return telegramDateHeaderPattern.MatchString(strings.TrimSpace(line))
+}
+
+func isTitleMetadataLine(line string) bool {
+	line = strings.TrimSpace(line)
+	for _, prefix := range []string{"类型：", "分享：", "网盘：", "简介：", "描述：", "更多资源："} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractWorkTitlesForLinks 为每个链接提取作品标题

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,10 @@ const (
 	MaxConcurrentJobs = 4
 	MaxVideoResults   = 10
 	MaxLinksPerResult = 200
+	// The new site protects link URLs behind a short-lived unlock ticket and
+	// limits the number of unlocks per account/day. Keep enough links for each
+	// title while avoiding a single search exhausting the account quota.
+	MaxResolvedLinksPerVideo = 3
 )
 
 var (
@@ -425,8 +430,9 @@ type User struct {
 }
 
 type LoginResponse struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
+	Success bool      `json:"success"`
+	Message string    `json:"message"`
+	Data    LoginUser `json:"data"`
 	User    struct {
 		ID         int    `json:"id"`
 		Username   string `json:"username"`
@@ -436,7 +442,25 @@ type LoginResponse struct {
 	} `json:"user"`
 }
 
+type LoginUser struct {
+	ID                 int    `json:"user_id"`
+	Role               string `json:"role"`
+	Username           string `json:"username"`
+	IsAdmin            bool   `json:"is_admin"`
+	MustChangePassword bool   `json:"must_change_password"`
+	FilesAllowed       bool   `json:"files_allowed"`
+	MountAllowed       bool   `json:"mount_allowed"`
+}
+
 type VideoSearchResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Data    struct {
+		List     []VideoItem `json:"list"`
+		Page     int         `json:"page"`
+		PageSize int         `json:"page_size"`
+		Total    int         `json:"total"`
+	} `json:"data"`
 	Code      int         `json:"code"`
 	Msg       string      `json:"msg"`
 	Page      int         `json:"page"`
@@ -446,6 +470,20 @@ type VideoSearchResponse struct {
 }
 
 type VideoItem struct {
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	Alias       string `json:"alias"`
+	Cover       string `json:"cover"`
+	Intro       string `json:"intro"`
+	Year        string `json:"year"`
+	Area        string `json:"area"`
+	Lang        string `json:"lang"`
+	Remarks     string `json:"remarks"`
+	Score       string `json:"score"`
+	Type        string `json:"type_name"`
+	Actor       string `json:"actor"`
+	DirectorNew string `json:"director"`
+
 	VodID       int    `json:"vod_id"`
 	VodName     string `json:"vod_name"`
 	VodPic      string `json:"vod_pic"`
@@ -458,6 +496,49 @@ type VideoItem struct {
 	VodActor    string `json:"vod_actor"`
 	VodDirector string `json:"vod_director"`
 	VodContent  string `json:"vod_content"`
+}
+
+type VideoDetailResponse struct {
+	Success bool            `json:"success"`
+	Message string          `json:"message"`
+	Data    VideoDetailData `json:"data"`
+}
+
+type VideoDetailData struct {
+	Video VideoItem   `json:"video"`
+	Links []VideoLink `json:"links"`
+}
+
+type VideoLink struct {
+	ID         int    `json:"id"`
+	Title      string `json:"title"`
+	PanType    string `json:"pan_type"`
+	IsMagnet   bool   `json:"is_magnet"`
+	Note       string `json:"note"`
+	HasCode    bool   `json:"has_code"`
+	Username   string `json:"username"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
+	VideoTitle string `json:"video_title"`
+}
+
+type LinkTicketResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Data    struct {
+		Code      string `json:"code"`
+		ExpiresIn int    `json:"expires_in"`
+		Ticket    string `json:"ticket"`
+	} `json:"data"`
+}
+
+type LinkOpenResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Data    struct {
+		Code string `json:"code"`
+		URL  string `json:"url"`
+	} `json:"data"`
 }
 
 type PanLinkResponse struct {
@@ -810,6 +891,34 @@ func (p *PanlianPlugin) flattenPanLinks(groups map[string]PanGroup) ([]model.Lin
 }
 
 func (p *PanlianPlugin) fetchVideos(client *http.Client, cookie string, keyword string) (*VideoSearchResponse, error) {
+	// Since 2026 the site exposes a Vue/JSON API under /api/videos. Keep the
+	// legacy endpoint below as a compatibility fallback for older deployments.
+	newValues := url.Values{}
+	newValues.Set("search", keyword)
+	newValues.Set("sort", "year_desc")
+	newValues.Set("page", "1")
+	newValues.Set("page_size", strconv.Itoa(MaxVideoResults))
+
+	var modern VideoSearchResponse
+	if err := p.doJSONGET(client, cookie, "/api/videos", newValues, &modern); err == nil && isModernVideoSearchResponse(modern) {
+		if !modern.Success {
+			if isLoginMessage(modern.Message) {
+				return nil, fmt.Errorf("%w: %s", errLoginRequired, modern.Message)
+			}
+			return nil, fmt.Errorf("盘链影片接口异常: %s", modern.Message)
+		}
+		modern.List = make([]VideoItem, 0, len(modern.Data.List))
+		for _, item := range modern.Data.List {
+			modern.List = append(modern.List, normalizeVideoItem(item))
+		}
+		modern.Total = modern.Data.Total
+		modern.Page = modern.Data.Page
+		modern.PageCount = 0
+		return &modern, nil
+	} else if errors.Is(err, errLoginRequired) {
+		return nil, err
+	}
+
 	values := url.Values{}
 	values.Set("wd", keyword)
 	values.Set("pg", "1")
@@ -828,6 +937,23 @@ func (p *PanlianPlugin) fetchVideos(client *http.Client, cookie string, keyword 
 }
 
 func (p *PanlianPlugin) fetchPanLinks(client *http.Client, cookie string, keyword string, vodID int) (*PanLinkResponse, error) {
+	var detail VideoDetailResponse
+	if err := p.doJSONGET(client, cookie, "/api/videos/"+strconv.Itoa(vodID), nil, &detail); err == nil && isModernVideoDetailResponse(detail) {
+		if !detail.Success {
+			if isLoginMessage(detail.Message) {
+				return nil, fmt.Errorf("%w: %s", errLoginRequired, detail.Message)
+			}
+			return nil, fmt.Errorf("盘链影片详情接口异常: %s", detail.Message)
+		}
+		groups, err := p.resolveModernLinks(client, cookie, detail.Data.Links)
+		if err != nil {
+			return nil, err
+		}
+		return &PanLinkResponse{Success: true, Total: len(detail.Data.Links), Data: groups}, nil
+	} else if errors.Is(err, errLoginRequired) {
+		return nil, err
+	}
+
 	values := url.Values{}
 	values.Set("keyword", keyword)
 	values.Set("vod_id", fmt.Sprintf("%d", vodID))
@@ -845,6 +971,135 @@ func (p *PanlianPlugin) fetchPanLinks(client *http.Client, cookie string, keywor
 	}
 	p.resolvePanLinkTokens(client, cookie, resp.Data)
 	return &resp, nil
+}
+
+func isModernVideoSearchResponse(resp VideoSearchResponse) bool {
+	return resp.Success || resp.Message != "" || resp.Data.List != nil || resp.Data.Total > 0
+}
+
+func isModernVideoDetailResponse(resp VideoDetailResponse) bool {
+	return resp.Success && (resp.Data.Video.ID > 0 || resp.Data.Links != nil)
+}
+
+// resolveModernLinks converts the current flat link model into the grouped
+// model used by PanSou. The upstream only reveals URLs after a short-lived
+// ticket is issued, so resolve a small, representative set per title to stay
+// within the account's daily quota.
+func (p *PanlianPlugin) resolveModernLinks(client *http.Client, cookie string, links []VideoLink) (map[string]PanGroup, error) {
+	if len(links) == 0 {
+		return map[string]PanGroup{}, nil
+	}
+	selected := selectModernLinks(links, MaxResolvedLinksPerVideo)
+	groups := make(map[string]PanGroup)
+	for _, link := range selected {
+		resolvedURL, password, err := p.resolveModernLink(client, cookie, link.ID)
+		if err != nil {
+			if errors.Is(err, errLoginRequired) {
+				return nil, err
+			}
+			continue
+		}
+		linkType := normalizeLinkType(link.PanType, resolvedURL)
+		if link.IsMagnet {
+			linkType = "magnet"
+		}
+		if linkType == "" {
+			linkType = "others"
+		}
+		group := groups[linkType]
+		group.Name = linkType
+		group.Links = append(group.Links, PanLinkItem{
+			Title:    strings.TrimSpace(link.Title),
+			URL:      resolvedURL,
+			Password: firstNonEmpty(password, ""),
+			Type:     linkType,
+			Time:     firstNonEmpty(link.UpdatedAt, link.CreatedAt),
+			Source:   link.Username,
+			ID:       strconv.Itoa(link.ID),
+		})
+		groups[linkType] = group
+	}
+	return groups, nil
+}
+
+func selectModernLinks(links []VideoLink, limit int) []VideoLink {
+	if limit <= 0 || len(links) <= limit {
+		return links
+	}
+	selected := make([]VideoLink, 0, limit)
+	seenTypes := make(map[string]struct{})
+	for _, link := range links {
+		linkType := normalizePanTypeName(link.PanType)
+		if linkType == "" {
+			linkType = normalizeLinkType(link.PanType, "")
+		}
+		if _, ok := seenTypes[linkType]; ok {
+			continue
+		}
+		seenTypes[linkType] = struct{}{}
+		selected = append(selected, link)
+		if len(selected) >= limit {
+			return selected
+		}
+	}
+	for _, link := range links {
+		if len(selected) >= limit {
+			break
+		}
+		found := false
+		for _, current := range selected {
+			if current.ID == link.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			selected = append(selected, link)
+		}
+	}
+	return selected
+}
+
+func (p *PanlianPlugin) resolveModernLink(client *http.Client, cookie string, linkID int) (string, string, error) {
+	if linkID <= 0 {
+		return "", "", fmt.Errorf("盘链链接 ID 无效")
+	}
+	values := map[string]interface{}{"link_id": linkID}
+	payload, err := json.Marshal(values)
+	if err != nil {
+		return "", "", err
+	}
+	var ticket LinkTicketResponse
+	if err := p.doJSONPOST(client, cookie, "/api/videos/link-ticket", payload, &ticket); err != nil {
+		return "", "", err
+	}
+	if !ticket.Success {
+		if isLoginMessage(ticket.Message) {
+			return "", "", fmt.Errorf("%w: %s", errLoginRequired, ticket.Message)
+		}
+		return "", "", fmt.Errorf("盘链链接票据接口异常: %s", ticket.Message)
+	}
+	if strings.TrimSpace(ticket.Data.Ticket) == "" {
+		return "", "", fmt.Errorf("盘链链接票据为空")
+	}
+
+	query := url.Values{}
+	query.Set("t", ticket.Data.Ticket)
+	var opened LinkOpenResponse
+	if err := p.doJSONGET(client, cookie, "/api/videos/link-open/"+strconv.Itoa(linkID), query, &opened); err != nil {
+		return "", "", err
+	}
+	if !opened.Success {
+		if isLoginMessage(opened.Message) {
+			return "", "", fmt.Errorf("%w: %s", errLoginRequired, opened.Message)
+		}
+		return "", "", fmt.Errorf("盘链链接解锁接口异常: %s", opened.Message)
+	}
+	resolvedURL := strings.TrimSpace(opened.Data.URL)
+	if !isRealPanURL(resolvedURL) {
+		return "", "", fmt.Errorf("盘链链接解锁后未返回有效地址")
+	}
+	return resolvedURL, strings.TrimSpace(opened.Data.Code), nil
 }
 
 func (p *PanlianPlugin) resolvePanLinkTokens(client *http.Client, cookie string, groups map[string]PanGroup) {
@@ -1041,6 +1296,9 @@ func (p *PanlianPlugin) doJSONGET(client *http.Client, cookie string, path strin
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
+			if resp.StatusCode == http.StatusUnauthorized || bytes.Contains(bytes.ToLower(body), []byte("请先登录")) || bytes.Contains(bytes.ToLower(body), []byte("admin_auth_required")) {
+				return fmt.Errorf("%w: HTTP %d", errLoginRequired, resp.StatusCode)
+			}
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
 			continue
@@ -1057,6 +1315,40 @@ func (p *PanlianPlugin) doJSONGET(client *http.Client, cookie string, path strin
 	return lastErr
 }
 
+func (p *PanlianPlugin) doJSONPOST(client *http.Client, cookie string, path string, payload []byte, out interface{}) error {
+	if client == nil {
+		client = &http.Client{Timeout: RequestTimeout}
+	}
+	targetURL := DefaultBaseURL + path
+	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	p.setPanlianHeaders(req, cookie, DefaultBaseURL+"/videos")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized || bytes.Contains(bytes.ToLower(body), []byte("请先登录")) || bytes.Contains(bytes.ToLower(body), []byte("admin_auth_required")) {
+			return fmt.Errorf("%w: HTTP %d", errLoginRequired, resp.StatusCode)
+		}
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("解析接口响应失败: %w", err)
+	}
+	return nil
+}
+
 func (p *PanlianPlugin) doLogin(username string, password string, remember bool) (string, *LoginResponse, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
@@ -1068,45 +1360,23 @@ func (p *PanlianPlugin) doLogin(username string, password string, remember bool)
 		Jar:     jar,
 	}
 
-	// 站点登录只认预先由公开接口建立的 PHPSESSID。
-	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, DefaultBaseURL+"/api/get_types.php", nil)
-	if err != nil {
-		cancel()
-		return "", nil, err
-	}
-	p.setPanlianHeaders(req, "", DefaultBaseURL+"/all-videos.php")
-	resp, err := client.Do(req)
-	if err != nil {
-		cancel()
-		return "", nil, err
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	cancel()
-	if resp.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("获取预登录会话失败: HTTP %d", resp.StatusCode)
-	}
-	baseURL, _ := url.Parse(DefaultBaseURL)
-	preCookie := cookiesToString(jar.Cookies(baseURL))
-
 	form := url.Values{}
 	form.Set("username", username)
 	form.Set("password", password)
 	if remember {
-		form.Set("remember", "on")
+		form.Set("remember", "1")
 	}
 
-	ctx, cancel = context.WithTimeout(context.Background(), RequestTimeout)
-	req, err = http.NewRequestWithContext(ctx, http.MethodPost, DefaultBaseURL+"/api/login.php", strings.NewReader(form.Encode()))
+	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, DefaultBaseURL+"/api/auth/login", strings.NewReader(form.Encode()))
 	if err != nil {
 		cancel()
 		return "", nil, err
 	}
-	p.setPanlianHeaders(req, preCookie, DefaultBaseURL+"/pages/login.php")
+	p.setPanlianHeaders(req, "", DefaultBaseURL+"/login")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 
-	resp, err = client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		cancel()
 		return "", nil, err
@@ -1127,9 +1397,14 @@ func (p *PanlianPlugin) doLogin(username string, password string, remember bool)
 		return "", nil, fmt.Errorf("解析登录响应失败: %w", err)
 	}
 	if !loginResp.Success {
-		return "", nil, errors.New(strings.TrimSpace(loginResp.Message))
+		message := strings.TrimSpace(loginResp.Message)
+		if message == "" {
+			message = "登录失败"
+		}
+		return "", nil, errors.New(message)
 	}
 
+	baseURL, _ := url.Parse(DefaultBaseURL)
 	cookieString := cookiesToString(jar.Cookies(baseURL))
 	if cookieString == "" {
 		return "", nil, fmt.Errorf("登录成功但未获取到有效 Cookie")
@@ -1277,8 +1552,9 @@ func (p *PanlianPlugin) handleLogin(c *gin.Context, hash string, reqData map[str
 		return
 	}
 
+	loginUsername := firstNonEmpty(loginResp.Data.Username, loginResp.User.Username, username)
 	respondSuccess(c, "登录成功", gin.H{
-		"username": loginResp.User.Username,
+		"username": loginUsername,
 		"status":   "active",
 	})
 }
@@ -1544,6 +1820,29 @@ func normalizePanLinks(groupKey string, group PanGroup) []PanLinkItem {
 	return items
 }
 
+func normalizeVideoItem(item VideoItem) VideoItem {
+	if item.VodID == 0 {
+		item.VodID = item.ID
+	}
+	item.VodName = firstNonEmpty(item.VodName, item.Title)
+	item.VodPic = firstNonEmpty(item.VodPic, item.Cover)
+	item.VodRemarks = firstNonEmpty(item.VodRemarks, item.Remarks)
+	item.VodScore = firstNonEmpty(item.VodScore, item.Score)
+	item.VodYear = firstNonEmpty(item.VodYear, item.Year)
+	item.VodArea = firstNonEmpty(item.VodArea, item.Area)
+	item.VodLang = firstNonEmpty(item.VodLang, item.Lang)
+	item.TypeName = firstNonEmpty(item.TypeName, item.Type)
+	item.VodActor = firstNonEmpty(item.VodActor, item.Actor)
+	item.VodDirector = firstNonEmpty(item.VodDirector, item.DirectorNew)
+	item.VodContent = firstNonEmpty(item.VodContent, item.Intro)
+	return item
+}
+
+func isLoginMessage(message string) bool {
+	text := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(text, "登录") || strings.Contains(text, "login") || strings.Contains(text, "auth_required")
+}
+
 func normalizePanTypeName(value string) string {
 	text := strings.ToLower(strings.TrimSpace(value))
 	switch text {
@@ -1602,7 +1901,7 @@ func normalizeLinkType(rawType string, rawURL string) string {
 		return "ed2k"
 	case strings.Contains(urlLower, "pan.quark.cn"), strings.Contains(urlLower, "pan.qoark.cn"):
 		return "quark"
-	case strings.Contains(urlLower, "drive.uc.cn"):
+	case strings.Contains(urlLower, "drive.uc.cn"), strings.Contains(urlLower, "pan.uc.cn"):
 		return "uc"
 	case strings.Contains(urlLower, "pan.baidu.com"):
 		return "baidu"
@@ -1614,7 +1913,7 @@ func normalizeLinkType(rawType string, rawURL string) string {
 		return "tianyi"
 	case strings.Contains(urlLower, "115.com"), strings.Contains(urlLower, "115cdn.com"), strings.Contains(urlLower, "anxia.com"):
 		return "115"
-	case strings.Contains(urlLower, "123pan.com"), strings.Contains(urlLower, "123684.com"), strings.Contains(urlLower, "123685.com"), strings.Contains(urlLower, "123865.com"), strings.Contains(urlLower, "123912.com"), strings.Contains(urlLower, "123592.com"):
+	case strings.Contains(urlLower, "123pan.com"), strings.Contains(urlLower, "123pan.cn"), strings.Contains(urlLower, "123684.com"), strings.Contains(urlLower, "123685.com"), strings.Contains(urlLower, "123865.com"), strings.Contains(urlLower, "123912.com"), strings.Contains(urlLower, "123592.com"):
 		return "123"
 	case strings.Contains(urlLower, "caiyun.139.com"), strings.Contains(urlLower, "yun.139.com"):
 		return "mobile"

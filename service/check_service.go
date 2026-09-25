@@ -849,20 +849,18 @@ func (s *CheckService) check115(item model.CheckItem, normalized string, client 
 	}
 
 	if response.State && response.Errno == 0 {
-		if len(response.Data.List) > 0 || response.Data.Count > 0 || response.Data.ShareInfo.SnapID != "" || response.Data.ShareInfo.ShareTitle != "" {
-			return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
-		}
-
 		shareState := response.Data.ShareState
 		if shareState == 0 {
 			shareState = response.Data.ShareInfo.ShareState
 		}
 
-		if shareState == 1 {
-			return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
+		reason := strings.TrimSpace(response.Data.ShareInfo.ForbidReason)
+		if reason == "" && (shareState == 0 || shareState == 1) {
+			if shareState == 1 || len(response.Data.List) > 0 || response.Data.Count > 0 || response.Data.ShareInfo.SnapID != "" || response.Data.ShareInfo.ShareTitle != "" {
+				return s.buildResult(item, normalized, checkStateOK, false, "链接有效"), nil
+			}
 		}
 
-		reason := strings.TrimSpace(response.Data.ShareInfo.ForbidReason)
 		if reason == "" {
 			reason = fmt.Sprintf("链接状态异常(share_state=%d)", shareState)
 		}

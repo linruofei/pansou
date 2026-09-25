@@ -1092,10 +1092,13 @@ func mergeResultsByType(results []model.SearchResult, keyword string, cloudTypes
 				}
 			}
 
-			// 关键词过滤：现在我们有了准确的链接-标题对应关系，只需检查每个链接的具体标题
+			// 关键词过滤：插件结果依赖链接标题；Telegram 结果已经经过
+			// t.me/s 的服务端搜索，关键词也可能只出现在简介/正文中，
+			// 不能因为标题字段被日期、格式名或另一作品覆盖而丢弃。
 			if !skipKeywordFilter && keyword != "" {
-				// 只检查链接的具体标题，无论是TG来源还是插件来源
-				if !strings.Contains(strings.ToLower(title), lowerKeyword) {
+				titleMatched := strings.Contains(strings.ToLower(title), lowerKeyword)
+				contentMatched := result.Channel != "" && strings.Contains(strings.ToLower(result.Content), lowerKeyword)
+				if !titleMatched && !contentMatched {
 					continue
 				}
 			}

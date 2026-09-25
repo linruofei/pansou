@@ -196,7 +196,9 @@ func CleanUCPanURL(url string) string {
 			url = url[startIdx:]
 
 			// 查找可能的结束标记（包括常见的网盘名称，可能出现在链接后面）
-			endMarkers := []string{" ", "\n", "\t", "，", "。", "；", ";", "，", ",", "网盘", "123", "夸克", "阿里", "百度"}
+			// URL href 本身通常已经是完整链接，不能把分享码中合法的
+			// "123" 当作后续文本分隔符（例如 /s/abc123）。
+			endMarkers := []string{" ", "\n", "\t", "，", "。", "；", ";", "，", ",", "网盘", "夸克", "阿里", "百度"}
 			minEndIdx := len(url)
 
 			for _, marker := range endMarkers {
